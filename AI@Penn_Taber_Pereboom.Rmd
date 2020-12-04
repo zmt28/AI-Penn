@@ -1,0 +1,212 @@
+---
+title: "AI@Penn Hackathon - 2020"
+author: "Zion Taber and Marilyn Pereboom"
+date: "December, 6 2020"
+output: 
+  pdf_document: 
+  number_sections: false
+  
+---
+
+# Preamble
+```{r}
+library('knitr')
+library('data.table')
+library('tidyverse')
+library('ggplot2')
+library('recommenderlab')
+library('cluster')
+library('rms')
+setwd("~/Desktop/Penn 2020-2021/AI@Penn")
+```
+
+# Data Processing
+```{r}
+# First dataset
+video_data <- fread("video_watched_events_CONFIDENTIAL.csv")
+video_data <- as.data.table(video_data)
+names(video_data) <- c('datetime_created', 'id', 'patient_id', 'video_id', 'homework_id', 'subsection_watched_from', 'url', 'primary_category', 'secondary_category', 'notes', 'description', 'tags', 'length')
+
+# Second dataset
+patient_info <- fread("patient_info_CONFIDENTIAL.csv")
+patient_info <- as.data.table(patient_info)
+names(patient_info) <- c('patient_id', 'user_id', 'provider_id', 'organization_id', 'datetime_created', 'age', 'sex', 'is_registered', 'has_bh_specialist', 'organization_name', 'product_tier', 'patient_id', 'total_activities_done', 'unique_days_with_activity')
+```
+
+```{r}
+video_data[, sum(is.na(homework_id))]
+
+#table_long <- video_data[, list(user = value[1], item = value[-1]), by = "chunk_user"]
+#head(table_long)
+
+# Trim excess columns
+table_users <- video_data[, 2:4]
+# Create a data table in long form to prepare for reshaping
+table_long <- table_users[, list(user = patient_id, item = video_id)]
+# Set id column to 1: a value of 1 is an instance of a user watching a video
+table_long[, id := 1]
+
+# Reshape data
+table_wide <- reshape(data = table_long,direction = "wide",idvar = "user",timevar = "item",v.names = "id")
+
+## show first few entries of data table rating matrix
+head(table_wide[, 1:6, with = FALSE])
+vector_users <- table_wide[, user]
+
+# removing user column
+table_wide[, user := NULL]
+setnames(x = table_wide, old = names(table_wide), new = substring(names(table_wide), 4))
+
+# Storing table_wide as a matrix
+matrix_wide <- as.matrix(table_wide)
+rownames(matrix_wide) <- vector_users
+
+# show first few entries of rating matrix
+head(matrix_wide[, 1:6])
+
+matrix_wide[is.na(matrix_wide)] <- 0
+ratings_matrix <- as(matrix_wide, "binaryRatingMatrix")
+```
+
+## Data Visualizations
+```{r}
+image(ratings_matrix[1:50, 1:50], main = "Binary rating matrix")
+n_users <- colCounts(ratings_matrix)
+qplot(n_users) + stat_bin(binwidth = 100) + ggtitle("Distribution of the number of users")
+```
+## Splitting data up into training and testing sets
+```{r}
+# 80% of data is used to train the model while 20% is kept out to be used for testing
+which_train <- sample(x = c(TRUE, FALSE),size = nrow(ratings_matrix),replace = TRUE,prob = c(0.8, 0.2))
+# Store training data in a variable
+recc_data_train <- ratings_matrix[which_train, ]
+# Store testing data in a variable
+recc_data_test <- ratings_matrix[!which_train, ]
+
+# model 1
+recc_model <- Recommender(data = recc_data_train, method = "IBCF", parameter = list(k = 30))
+# model 2
+#recc_model <- Recommender(data = recc_data_train,method = "IBCF",parameter = list(method = "Jaccard"))
+```
+
+
+```{r}
+# Verify some details about our model
+model_details <- getModel(recc_model)
+model_details$description
+## [1] "IBCF: Reduced similarity matrix"
+model_details$k
+## [1] 30
+
+# Check structure of our similarity matrix
+class(model_details$sim)
+## [1] "dgCMatrix"
+## attr(,"package")
+## [1] "Matrix"
+
+# dimensions should be a square matrix with size equal to number of items
+dim(model_details$sim)
+## [1] 1023 1023
+```
+
+
+```{r}
+col_sums <- colSums(model_details$sim > 0)
+# build the distribution chart
+qplot(col_sums) + stat_bin(binwidth = 1) + ggtitle("Distribution of the column count")
+```
+
+## Apply Reccomender and Make Predictions
+```{r}
+# choose number of videos to recommend to each user
+n_recommended <- 6
+# store the top n recommendations that our algorithm identified
+recc_predicted <- predict(object = recc_model, newdata = recc_data_test, n = n_recommended)
+
+print(recc_predicted)
+## Recommendations as 'topNList' with n = 6 for 1869 users.
+
+## Recommendations for the first user
+recc_predicted@items[[1]]
+
+# Extract the video IDs from the indexes given by the recommender for the first user
+recc_user_1 <- recc_predicted@items[[1]]
+videos_user_1 <- recc_predicted@itemLabels[recc_user_1]
+print(videos_user_1)
+
+## confusing things you don't understand yet
+#dist_ratings <- as(recc_model@model$sim, "matrix")
+#table_labels <- data.frame(id = recc_predicted@itemLabels)
+```
+
+## We can define a matrix with the recommendations for each user
+```{r}
+# this is where there's issues: should it be recc_predicted@items? or recc_predicted@itemLabels or recc_predicted@ratings?
+recc_matrix <- sapply(recc_predicted@items, function(x){
+  colnames(ratings_matrix)[x]
+})
+# Why is this a list/vector and not a 2D matrix?
+length(recc_matrix) # length is number of users
+## [1] 1869
+dim(recc_matrix)
+# NULL
+
+# trying to turn into a matrix:
+r_matrix <- as.matrix(recc_matrix)
+dim(r_matrix)
+
+# Our matrix has too many data points for any of the following to work:
+
+# identify most recommended videos and build a frequency plot
+## Our matrix is too large to be turned into a table: will throw an error
+#number_of_items <- factor(table(r_matrix))
+#chart_title <- "Distribution of the number of items for IBCF"
+#qplot(number_of_items) + ggtitle(chart_title)
+# the most popular videos:
+#number_of_items_sorted <- sort(number_of_items, decreasing = TRUE)
+#number_of_items_top <- head(number_of_items_sorted, n = 4)
+#table_top <- data.frame(names(number_of_items_top), number_of_items_top)
+
+
+
+```
+
+
+```{r}
+# Collaborative filtering processing ....
+video_data2 = video_data[unique(video_data$video_id), ]
+video_data_final = video_data2[,c(4,1,2,3,5,6,7,8,9,10,11,12,13)]
+```
+
+## Patient info dataset
+```{r}
+table_patients <- patient_info[, c(1,6,7,9)]
+names(table_patients) <- c('patient_id', 'age', 'sex', 'has_bh_specialist')
+#dummy_cols(sex)
+
+#manually define variables
+age <- as.numeric(table_patients$age)
+sex <- as.factor(table_patients$sex)
+specialist <- as.factor(table_patients$has_bh_specialist)
+ddist <- datadist(age, sex, specialist)
+
+table_patients <- table_patients[, sex := (sex == 'Female') ]
+ddist <- table_patients[,daisy(x = table_patients)]
+ddist <- as.matrix(ddist)
+
+#This always breaks my R notebook
+#image(x = ddist)
+
+#dist_category <- patient_info[, 1 - dist(sex == "male")]
+#dist_category <- as(dist_category, "matrix")
+#image(dist_category[1:50, 1:50], main = "Binary rating matrix")
+
+#class(dist_category)
+## dist
+## p1 <- Predict(fit, age, sex)
+## p2 <- Predict(fit, cholesterol, sex)
+## p3 <- Predict(fit, blood.pressure, sex)
+## p <- rbind(age=p1, cholesterol=p2, blood.pressure=p3)
+
+```
+
